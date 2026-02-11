@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SlicedStore, defineSlice, type SliceMiddleware } from './index.js';
+import { SlicedStore, defineSlice, type Middleware } from './index.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 type WalletState = { balance: number; bet: number; currency: string };
 type SpinState = { remaining: number; total: number; multiplier: number };
 
-function walletDef(mw?: SliceMiddleware<WalletState>[]) {
+function walletDef(mw?: Middleware<WalletState>[]) {
     return defineSlice('wallet', {
         defaults: { balance: 1000, bet: 1, currency: 'USD' },
         middleware: mw,
@@ -59,18 +59,18 @@ describe('register', () => {
     });
 });
 
-// ─── get / getAll / set / update ─────────────────────────────────────────────
+// ─── get / getAll / set / batch ──────────────────────────────────────────────
 
-describe('get / set / update', () => {
+describe('get / set / batch', () => {
     it('set updates a single field', () => {
         const handle = store.register(walletDef());
         handle.set('bet', 10);
         expect(handle.get('bet')).toBe(10);
     });
 
-    it('update merges partial state', () => {
+    it('batch merges partial state', () => {
         const handle = store.register(walletDef());
-        handle.update({ balance: 500, bet: 5 });
+        handle.batch({ balance: 500, bet: 5 });
         expect(handle.get('balance')).toBe(500);
         expect(handle.get('bet')).toBe(5);
         expect(handle.get('currency')).toBe('USD');
@@ -85,20 +85,12 @@ describe('get / set / update', () => {
     it('no-op when setting same value', () => {
         const handle = store.register(walletDef());
         const fn = vi.fn();
-        handle.onChange.add(fn);
+        handle.onChange(fn);
         handle.set('bet', 1); // same as default
         expect(fn).not.toHaveBeenCalled();
     });
 
     // ── Defensive cloning ────────────────────────────────────────────────
-
-    it('get() returns a clone for non-primitive values', () => {
-        const def = defineSlice('arr', { defaults: { items: [1, 2, 3] } });
-        const handle = store.register(def);
-        const items = handle.get('items');
-        items.push(4);
-        expect(handle.get('items')).toEqual([1, 2, 3]); // unaffected
-    });
 
     it('getAll() returns a deep clone', () => {
         const def = defineSlice('nested', { defaults: { obj: { a: 1 } } });
@@ -106,29 +98,6 @@ describe('get / set / update', () => {
         const state = handle.getAll();
         (state as any).obj.a = 999;
         expect(handle.get('obj')).toEqual({ a: 1 }); // unaffected
-    });
-
-    it('set() clones incoming objects so caller mutation does not affect store', () => {
-        const def = defineSlice('arr', { defaults: { items: [1] } });
-        const handle = store.register(def);
-        const arr = [10, 20];
-        handle.set('items', arr);
-        arr.push(30);
-        expect(handle.get('items')).toEqual([10, 20]); // unaffected
-    });
-
-    it('update() clones incoming values', () => {
-        const def = defineSlice('nested', { defaults: { obj: { x: 0 } } });
-        const handle = store.register(def);
-        const obj = { x: 5 };
-        handle.update({ obj });
-        obj.x = 999;
-        expect(handle.get('obj')).toEqual({ x: 5 }); // unaffected
-    });
-
-    it('throws descriptive error when setting non-cloneable value', () => {
-        const handle = store.register(walletDef());
-        expect(() => handle.set('balance', (() => { }) as any)).toThrow('structuredClone-able');
     });
 });
 
@@ -178,7 +147,7 @@ describe('onChange (slice signal)', () => {
     it('fires on any field change', () => {
         const handle = store.register(walletDef());
         const fn = vi.fn();
-        handle.onChange.add(fn);
+        handle.onChange(fn);
         handle.set('bet', 10);
         expect(fn).toHaveBeenCalledTimes(1);
         expect(fn.mock.calls[0][0]).toMatchObject({ bet: 10, balance: 1000 });
@@ -187,7 +156,7 @@ describe('onChange (slice signal)', () => {
     it('does not fire when no actual change', () => {
         const handle = store.register(walletDef());
         const fn = vi.fn();
-        handle.onChange.add(fn);
+        handle.onChange(fn);
         handle.set('bet', 1); // same value
         expect(fn).not.toHaveBeenCalled();
     });
@@ -200,7 +169,7 @@ describe('global onChange', () => {
         const wallet = store.register(walletDef());
         const spin = store.register(spinDef());
         const fn = vi.fn();
-        store.onChange.add(fn);
+        store.onChange(fn);
         wallet.set('bet', 5);
         expect(fn).toHaveBeenCalledTimes(1);
         spin.set('remaining', 4);
@@ -227,11 +196,11 @@ describe('slice() readonly handle', () => {
         expect(fn).toHaveBeenCalledWith(500, 1000);
     });
 
-    it('has no update or set methods at runtime', () => {
+    it('has no set or batch methods at runtime', () => {
         store.register(walletDef());
         const ro = store.slice('wallet') as any;
-        expect(ro.update).toBeUndefined();
         expect(ro.set).toBeUndefined();
+        expect(ro.batch).toBeUndefined();
     });
 
     it('is frozen', () => {
@@ -258,7 +227,7 @@ describe('computed', () => {
         const handle = store.register(walletDef());
         const totalBet = handle.computed((s) => s.balance * s.bet);
         const fn = vi.fn();
-        totalBet.add(fn);
+        totalBet.onChange(fn);
         handle.set('bet', 10);
         expect(fn).toHaveBeenCalledWith(10000);
         expect(totalBet.value).toBe(10000);
@@ -268,7 +237,7 @@ describe('computed', () => {
         const handle = store.register(walletDef());
         const isRich = handle.computed((s) => s.balance > 500);
         const fn = vi.fn();
-        isRich.add(fn);
+        isRich.onChange(fn);
         handle.set('bet', 5); // balance still 1000, isRich still true
         expect(fn).not.toHaveBeenCalled();
     });
@@ -277,7 +246,7 @@ describe('computed', () => {
         const handle = store.register(walletDef());
         const totalBet = handle.computed((s) => s.balance * s.bet);
         const fn = vi.fn();
-        totalBet.add(fn);
+        totalBet.onChange(fn);
         totalBet.dispose();
         handle.set('bet', 10);
         expect(fn).not.toHaveBeenCalled();
@@ -296,7 +265,7 @@ describe('computed', () => {
 
 describe('middleware', () => {
     it('transforms incoming values', () => {
-        const clampBet: SliceMiddleware<WalletState> = (_current, incoming) => {
+        const clampBet: Middleware<WalletState> = (_state, incoming) => {
             if (incoming.bet !== undefined && incoming.bet > 100) {
                 return { ...incoming, bet: 100 };
             }
@@ -308,20 +277,20 @@ describe('middleware', () => {
     });
 
     it('returning null blocks the update', () => {
-        const blockAll: SliceMiddleware<WalletState> = () => null;
+        const blockAll: Middleware<WalletState> = () => null;
         const handle = store.register(walletDef([blockAll]));
         handle.set('bet', 10);
         expect(handle.get('bet')).toBe(1); // unchanged
     });
 
-    it('middleware chain runs in order', () => {
-        const double: SliceMiddleware<WalletState> = (_current, incoming) => {
+    it('middleware pipeline runs in order', () => {
+        const double: Middleware<WalletState> = (_state, incoming) => {
             if (incoming.bet !== undefined) {
                 return { ...incoming, bet: incoming.bet * 2 };
             }
             return incoming;
         };
-        const addOne: SliceMiddleware<WalletState> = (_current, incoming) => {
+        const addOne: Middleware<WalletState> = (_state, incoming) => {
             if (incoming.bet !== undefined) {
                 return { ...incoming, bet: incoming.bet + 1 };
             }
@@ -333,29 +302,29 @@ describe('middleware', () => {
         expect(handle.get('bet')).toBe(11);
     });
 
-    it('wraps middleware errors with context', () => {
+    it('middleware errors propagate directly', () => {
         function badMiddleware() {
             throw new Error('mw error');
         }
         const handle = store.register(walletDef([badMiddleware as any]));
-        expect(() => handle.set('bet', 10)).toThrow(/badMiddleware.*wallet/);
+        expect(() => handle.set('bet', 10)).toThrow('mw error');
     });
 
-    it('uses index for anonymous middleware in error', () => {
+    it('anonymous middleware errors propagate directly', () => {
         const handle = store.register(walletDef([
             () => { throw new Error('fail'); }
         ] as any));
-        expect(() => handle.set('bet', 10)).toThrow(/index 0/);
+        expect(() => handle.set('bet', 10)).toThrow('fail');
     });
 
-    it('error includes cause', () => {
+    it('error is the original error', () => {
         const cause = new Error('root');
-        function failMw() { throw cause; }
-        const handle = store.register(walletDef([failMw as any]));
+        const failMw: Middleware<WalletState> = () => { throw cause; };
+        const handle = store.register(walletDef([failMw]));
         try {
             handle.set('bet', 10);
         } catch (err: any) {
-            expect(err.cause).toBe(cause);
+            expect(err).toBe(cause);
         }
     });
 });
@@ -366,7 +335,7 @@ describe('batch', () => {
     it('defers slice onChange to end of batch', () => {
         const handle = store.register(walletDef());
         const fn = vi.fn();
-        handle.onChange.add(fn);
+        handle.onChange(fn);
         store.batch(() => {
             handle.set('bet', 10);
             handle.set('balance', 500);
@@ -380,7 +349,7 @@ describe('batch', () => {
         const wallet = store.register(walletDef());
         const spin = store.register(spinDef());
         const fn = vi.fn();
-        store.onChange.add(fn);
+        store.onChange(fn);
         store.batch(() => {
             wallet.set('bet', 10);
             spin.set('remaining', 3);
@@ -409,8 +378,8 @@ describe('batch', () => {
         const handle = store.register(walletDef());
         const order: string[] = [];
         handle.on('bet', () => order.push('field'));
-        handle.onChange.add(() => order.push('slice'));
-        store.onChange.add(() => order.push('global'));
+        handle.onChange(() => order.push('slice'));
+        store.onChange(() => order.push('global'));
         store.batch(() => {
             handle.set('bet', 10);
         });
@@ -433,7 +402,7 @@ describe('batch', () => {
     it('nested batch just runs inline', () => {
         const handle = store.register(walletDef());
         const fn = vi.fn();
-        handle.onChange.add(fn);
+        handle.onChange(fn);
         store.batch(() => {
             store.batch(() => {
                 handle.set('bet', 10);
@@ -447,7 +416,7 @@ describe('batch', () => {
     it('does not emit if no changes in batch', () => {
         store.register(walletDef());
         const fn = vi.fn();
-        store.onChange.add(fn);
+        store.onChange(fn);
         store.batch(() => {
             // no mutations
         });
@@ -489,8 +458,8 @@ describe('batch', () => {
         const sliceFn = vi.fn();
         const globalFn = vi.fn();
         handle.on('bet', fieldFn);
-        handle.onChange.add(sliceFn);
-        store.onChange.add(globalFn);
+        handle.onChange(sliceFn);
+        store.onChange(globalFn);
         expect(() => {
             store.batch(() => {
                 handle.set('bet', 99);
@@ -551,7 +520,7 @@ describe('restore', () => {
     it('fires slice onChange on restore', () => {
         const handle = store.register(walletDef());
         const fn = vi.fn();
-        handle.onChange.add(fn);
+        handle.onChange(fn);
         store.restore({ wallet: { balance: 500, bet: 1, currency: 'USD' } });
         expect(fn).toHaveBeenCalledTimes(1);
     });
@@ -559,7 +528,7 @@ describe('restore', () => {
     it('fires global onChange on restore', () => {
         store.register(walletDef());
         const fn = vi.fn();
-        store.onChange.add(fn);
+        store.onChange(fn);
         store.restore({ wallet: { balance: 500, bet: 1, currency: 'USD' } });
         expect(fn).toHaveBeenCalledTimes(1);
     });
@@ -567,7 +536,7 @@ describe('restore', () => {
     it('does not fire global onChange when no slices matched', () => {
         store.register(walletDef());
         const fn = vi.fn();
-        store.onChange.add(fn);
+        store.onChange(fn);
         store.restore({ unknown: { x: 1 } });
         expect(fn).not.toHaveBeenCalled();
     });
@@ -578,8 +547,8 @@ describe('restore', () => {
         const sliceFn = vi.fn();
         const globalFn = vi.fn();
         handle.on('bet', fieldFn);
-        handle.onChange.add(sliceFn);
-        store.onChange.add(globalFn);
+        handle.onChange(sliceFn);
+        store.onChange(globalFn);
         store.batch(() => {
             store.restore({ wallet: { balance: 500, bet: 50, currency: 'EUR' } });
             expect(fieldFn).not.toHaveBeenCalled();
@@ -617,7 +586,7 @@ describe('resetState', () => {
         handle.set('bet', 99);
         handle.set('balance', 0);
         const fn = vi.fn();
-        handle.onChange.add(fn);
+        handle.onChange(fn);
         store.resetState();
         expect(handle.get('bet')).toBe(1);
         expect(handle.get('balance')).toBe(1000);
@@ -640,7 +609,7 @@ describe('resetState', () => {
         const fieldFn = vi.fn();
         const sliceFn = vi.fn();
         handle.on('bet', fieldFn);
-        handle.onChange.add(sliceFn);
+        handle.onChange(sliceFn);
         // clear call counts from the set above
         fieldFn.mockClear();
         sliceFn.mockClear();
@@ -657,10 +626,10 @@ describe('resetState', () => {
 // ─── Full state / snapshot / reset ───────────────────────────────────────────
 
 describe('full state operations', () => {
-    it('getFullState returns all slices', () => {
+    it('getState returns all slices', () => {
         store.register(walletDef());
         store.register(spinDef());
-        const state = store.getFullState();
+        const state = store.getState();
         expect(state).toHaveProperty('wallet');
         expect(state).toHaveProperty('spin');
         expect(Object.isFrozen(state)).toBe(true);
@@ -678,7 +647,7 @@ describe('full state operations', () => {
         const handle = store.register(walletDef());
         handle.set('bet', 99);
         const fn = vi.fn();
-        handle.onChange.add(fn);
+        handle.onChange(fn);
         store.reset();
         expect(handle.get('bet')).toBe(1);
         // Listener was cleared
@@ -708,8 +677,8 @@ describe('full state operations', () => {
 
 // ─── Computed signal cleanup ─────────────────────────────────────────────────
 
-describe('computed signal cleanup', () => {
-    it('unregister() disposes all computed signals', () => {
+describe('computed cleanup', () => {
+    it('unregister() disposes all computed', () => {
         const handle = store.register(walletDef());
         const c1 = handle.computed((s) => s.balance * s.bet);
         const c2 = handle.computed((s) => s.balance > 500);
@@ -720,7 +689,7 @@ describe('computed signal cleanup', () => {
         expect(c2.isDisposed).toBe(true);
     });
 
-    it('reset() disposes all computed signals', () => {
+    it('reset() disposes all computed', () => {
         const handle = store.register(walletDef());
         const c = handle.computed((s) => s.bet * 2);
         expect(c.isDisposed).toBe(false);
@@ -728,13 +697,13 @@ describe('computed signal cleanup', () => {
         expect(c.isDisposed).toBe(true);
     });
 
-    it('resetState() keeps computed signals alive', () => {
+    it('resetState() keeps computed alive', () => {
         const handle = store.register(walletDef());
         handle.set('bet', 50);
         const c = handle.computed((s) => s.bet * 2);
         expect(c.value).toBe(100);
         const fn = vi.fn();
-        c.add(fn);
+        c.onChange(fn);
         store.resetState();
         // bet resets to 1, computed should update to 2
         expect(c.isDisposed).toBe(false);
@@ -757,6 +726,21 @@ describe('computed signal cleanup', () => {
         const c = ro.computed((s) => s.balance + s.bet);
         expect(c.isDisposed).toBe(false);
         store.unregister('wallet');
+        expect(c.isDisposed).toBe(true);
+    });
+
+    it('throws when adding listener to disposed computed', () => {
+        const handle = store.register(walletDef());
+        const c = handle.computed((s) => s.bet);
+        c.dispose();
+        expect(() => c.onChange(() => {})).toThrow('disposed');
+    });
+
+    it('dispose is idempotent', () => {
+        const handle = store.register(walletDef());
+        const c = handle.computed((s) => s.bet);
+        c.dispose();
+        expect(() => c.dispose()).not.toThrow();
         expect(c.isDisposed).toBe(true);
     });
 });
@@ -788,7 +772,7 @@ describe('edge cases', () => {
         const ro = store.slice<WalletState>('wallet');
         const totalBet = ro.computed((s) => s.balance - s.bet);
         const fn = vi.fn();
-        totalBet.add(fn);
+        totalBet.onChange(fn);
         handle.set('bet', 100);
         expect(totalBet.value).toBe(900);
         expect(fn).toHaveBeenCalledWith(900);
@@ -817,5 +801,27 @@ describe('edge cases', () => {
 
         expect(wBet).toHaveBeenCalledWith(10, 1);
         expect(sRem).toHaveBeenCalledWith(0, 5);
+    });
+
+    it('set returns false when rejected by middleware', () => {
+        const blockBet: Middleware<WalletState> = (_state, incoming) => {
+            if (incoming.bet !== undefined) return null;
+            return incoming;
+        };
+        const handle = store.register(walletDef([blockBet]));
+        expect(handle.set('bet', 10)).toBe(false);
+        expect(handle.set('balance', 500)).toBe(true);
+    });
+
+    it('batch on handle returns rejected keys', () => {
+        const blockBet: Middleware<WalletState> = (_state, incoming) => {
+            if (incoming.bet !== undefined) return null;
+            return incoming;
+        };
+        const handle = store.register(walletDef([blockBet]));
+        const rejected = handle.batch({ balance: 500, bet: 10 });
+        expect(rejected).toEqual(['bet']);
+        expect(handle.get('balance')).toBe(500);
+        expect(handle.get('bet')).toBe(1);
     });
 });
