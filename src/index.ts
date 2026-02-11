@@ -115,7 +115,8 @@ interface SliceRecord {
     definition: SliceDefinition<string, SliceState>;
     state: SliceState;
     signal: Signal<Readonly<SliceState>>;
-    fieldSignals: Map<string, Signal<unknown>>;
+    fieldSignals: Map<string, Signal<FieldSignalPayload<SliceState, string>>>;
+    computedSignals: Set<ComputedSignal<unknown>>;
     middleware: SliceMiddleware<SliceState>[];
 }
 
@@ -159,6 +160,7 @@ export class SlicedStore {
             state: clonedDefaults,
             signal: new Signal<Readonly<SliceState>>(),
             fieldSignals: new Map(),
+            computedSignals: new Set(),
             middleware: (definition.middleware ?? []) as SliceMiddleware<SliceState>[],
         };
 
@@ -308,6 +310,8 @@ export class SlicedStore {
     reset(): void {
         for (const record of this._slices.values()) {
             record.state = structuredClone(record.definition.defaults);
+            for (const cs of record.computedSignals) cs.dispose();
+            record.computedSignals.clear();
             record.signal.clear();
             record.fieldSignals.forEach((s) => s.clear());
             record.fieldSignals.clear();
@@ -333,6 +337,8 @@ export class SlicedStore {
     unregister(name: string): void {
         const record = this._slices.get(name);
         if (record) {
+            for (const cs of record.computedSignals) cs.dispose();
+            record.computedSignals.clear();
             record.signal.clear();
             record.fieldSignals.forEach((s) => s.clear());
             this._slices.delete(name);
@@ -377,13 +383,12 @@ export class SlicedStore {
                 const record = store._getRecord(name);
                 let signal = record.fieldSignals.get(key);
                 if (!signal) {
-                    signal = new Signal<unknown>();
+                    signal = new Signal<FieldSignalPayload<SliceState, string>>();
                     record.fieldSignals.set(key, signal);
                 }
 
-                const wrapper = (payload: unknown) => {
-                    const { value, prev } = payload as FieldSignalPayload<T, K>;
-                    callback(value, prev);
+                const wrapper = (payload: FieldSignalPayload<SliceState, string>) => {
+                    callback(payload.value as T[K], payload.prev as T[K]);
                 };
 
                 signal.add(wrapper);
@@ -397,7 +402,10 @@ export class SlicedStore {
             computed<R>(fn: (state: Readonly<T>) => R): ComputedSignal<R> {
                 const record = store._getRecord(name);
                 let lastValue = fn(record.state as T);
-                const derived = new ComputedSignal<R>(lastValue, () => binding.detach());
+                const derived = new ComputedSignal<R>(lastValue, () => {
+                    binding.detach();
+                    record.computedSignals.delete(derived as ComputedSignal<unknown>);
+                });
 
                 const binding = record.signal.add((state) => {
                     const next = fn(state as T);
@@ -407,6 +415,7 @@ export class SlicedStore {
                     }
                 });
 
+                record.computedSignals.add(derived as ComputedSignal<unknown>);
                 return derived;
             },
         };
@@ -415,14 +424,67 @@ export class SlicedStore {
     private _createReadonlyHandle<T extends SliceState>(
         name: string,
     ): Readonly<Pick<SliceHandle<T>, 'get' | 'getAll' | 'on' | 'onChange' | 'computed' | 'name'>> {
-        const full = this._createHandle<T>(name);
+        const store = this;
+
         return Object.freeze({
-            name: full.name,
-            get: full.get,
-            getAll: full.getAll,
-            on: full.on,
-            get onChange() { return full.onChange; },
-            computed: full.computed,
+            name,
+
+            get<K extends keyof T & string>(key: K): T[K] {
+                const record = store._getRecord(name);
+                const value = record.state[key];
+                if (typeof value === 'object' && value !== null) {
+                    return structuredClone(value) as T[K];
+                }
+                return value as T[K];
+            },
+
+            getAll(): Readonly<T> {
+                const record = store._getRecord(name);
+                return structuredClone(record.state) as T;
+            },
+
+            on<K extends keyof T & string>(
+                key: K,
+                callback: (value: T[K], prev: T[K]) => void,
+            ): () => void {
+                const record = store._getRecord(name);
+                let signal = record.fieldSignals.get(key);
+                if (!signal) {
+                    signal = new Signal<FieldSignalPayload<SliceState, string>>();
+                    record.fieldSignals.set(key, signal);
+                }
+
+                const wrapper = (payload: FieldSignalPayload<SliceState, string>) => {
+                    callback(payload.value as T[K], payload.prev as T[K]);
+                };
+
+                signal.add(wrapper);
+                return () => signal!.remove(wrapper);
+            },
+
+            get onChange(): Signal<Readonly<T>> {
+                return store._getRecord(name).signal as unknown as Signal<Readonly<T>>;
+            },
+
+            computed<R>(fn: (state: Readonly<T>) => R): ComputedSignal<R> {
+                const record = store._getRecord(name);
+                let lastValue = fn(record.state as T);
+                const derived = new ComputedSignal<R>(lastValue, () => {
+                    binding.detach();
+                    record.computedSignals.delete(derived as ComputedSignal<unknown>);
+                });
+
+                const binding = record.signal.add((state) => {
+                    const next = fn(state as T);
+                    if (!Object.is(next, lastValue)) {
+                        lastValue = next;
+                        derived.emit(next);
+                    }
+                });
+
+                record.computedSignals.add(derived as ComputedSignal<unknown>);
+                return derived;
+            },
         });
     }
 
@@ -487,18 +549,20 @@ export class SlicedStore {
         const record = this._getRecord(name);
 
         // Run slice middleware
-        let processed: Partial<SliceState> | null = partial;
+        let processed: Partial<SliceState> = partial;
         for (let i = 0; i < record.middleware.length; i++) {
             const mw = record.middleware[i];
+            let result: Partial<SliceState> | null;
             try {
-                processed = mw(record.state, processed!);
+                result = mw(record.state, processed);
             } catch (err) {
                 throw new Error(
                     `Middleware "${mw.name || `index ${i}`}" failed on slice "${name}"`,
                     { cause: err },
                 );
             }
-            if (processed === null) return;
+            if (result === null) return;
+            processed = result;
         }
 
         // Snapshot pre-batch state on first mutation per slice (deep copy for rollback)
@@ -509,7 +573,7 @@ export class SlicedStore {
         // Clone incoming values to prevent external mutation of internal state
         let clonedProcessed: Partial<SliceState>;
         try {
-            clonedProcessed = structuredClone(processed!);
+            clonedProcessed = structuredClone(processed);
         } catch (err) {
             throw new Error(
                 `Slice "${name}": update values must be structuredClone-able (no functions, Symbols, DOM nodes, etc.)`,

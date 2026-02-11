@@ -706,6 +706,61 @@ describe('full state operations', () => {
     });
 });
 
+// ─── Computed signal cleanup ─────────────────────────────────────────────────
+
+describe('computed signal cleanup', () => {
+    it('unregister() disposes all computed signals', () => {
+        const handle = store.register(walletDef());
+        const c1 = handle.computed((s) => s.balance * s.bet);
+        const c2 = handle.computed((s) => s.balance > 500);
+        expect(c1.isDisposed).toBe(false);
+        expect(c2.isDisposed).toBe(false);
+        store.unregister('wallet');
+        expect(c1.isDisposed).toBe(true);
+        expect(c2.isDisposed).toBe(true);
+    });
+
+    it('reset() disposes all computed signals', () => {
+        const handle = store.register(walletDef());
+        const c = handle.computed((s) => s.bet * 2);
+        expect(c.isDisposed).toBe(false);
+        store.reset();
+        expect(c.isDisposed).toBe(true);
+    });
+
+    it('resetState() keeps computed signals alive', () => {
+        const handle = store.register(walletDef());
+        handle.set('bet', 50);
+        const c = handle.computed((s) => s.bet * 2);
+        expect(c.value).toBe(100);
+        const fn = vi.fn();
+        c.add(fn);
+        store.resetState();
+        // bet resets to 1, computed should update to 2
+        expect(c.isDisposed).toBe(false);
+        expect(c.value).toBe(2);
+        expect(fn).toHaveBeenCalledWith(2);
+    });
+
+    it('manually disposed computed is removed from tracking set', () => {
+        const handle = store.register(walletDef());
+        const c = handle.computed((s) => s.bet);
+        c.dispose();
+        // unregister should not throw even though c is already disposed
+        expect(() => store.unregister('wallet')).not.toThrow();
+        expect(c.isDisposed).toBe(true);
+    });
+
+    it('computed from readonly handle is cleaned up on unregister', () => {
+        store.register(walletDef());
+        const ro = store.slice<WalletState>('wallet');
+        const c = ro.computed((s) => s.balance + s.bet);
+        expect(c.isDisposed).toBe(false);
+        store.unregister('wallet');
+        expect(c.isDisposed).toBe(true);
+    });
+});
+
 // ─── Edge cases ──────────────────────────────────────────────────────────────
 
 describe('edge cases', () => {
