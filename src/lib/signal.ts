@@ -74,13 +74,25 @@ export class Signal<T = void> {
         }
     }
 
-    /** Emit value to all listeners */
+    /** Emit value to all listeners. All listeners run even if some throw. */
     emit(value: T): void {
+        let firstError: unknown;
+        let hasError = false;
         for (const entry of this.bindings) {
             if (entry.once) {
                 this.bindings.delete(entry);
             }
-            entry.fn.call(entry.thisArg, value);
+            try {
+                entry.fn.call(entry.thisArg, value);
+            } catch (err) {
+                if (!hasError) {
+                    firstError = err;
+                    hasError = true;
+                }
+            }
+        }
+        if (hasError) {
+            throw firstError;
         }
     }
 
@@ -107,18 +119,48 @@ export class Signal<T = void> {
 /**
  * A derived signal that tracks a source signal and can be disposed
  * to detach from the source, preventing memory leaks.
+ *
+ * Use `.value` to read the current derived value synchronously.
+ * Use `.dispose()` to detach from the source signal and clear all listeners.
  */
 export class ComputedSignal<T> extends Signal<T> {
     private _disposeFn: (() => void) | null;
     private _disposed = false;
+    private _value: T;
 
-    constructor(disposeFn: () => void) {
+    constructor(initialValue: T, disposeFn: () => void) {
         super();
+        this._value = initialValue;
         this._disposeFn = disposeFn;
+    }
+
+    /** Current derived value */
+    get value(): T {
+        return this._value;
     }
 
     get isDisposed(): boolean {
         return this._disposed;
+    }
+
+    override add(listener: (value: T) => void, thisArg?: unknown): SignalBinding {
+        if (this._disposed) {
+            throw new Error('Cannot add listener to a disposed ComputedSignal');
+        }
+        return super.add(listener, thisArg);
+    }
+
+    override once(listener: (value: T) => void, thisArg?: unknown): SignalBinding {
+        if (this._disposed) {
+            throw new Error('Cannot add listener to a disposed ComputedSignal');
+        }
+        return super.once(listener, thisArg);
+    }
+
+    override emit(value: T): void {
+        if (this._disposed) return;
+        this._value = value;
+        super.emit(value);
     }
 
     dispose(): void {

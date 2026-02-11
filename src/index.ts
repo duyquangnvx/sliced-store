@@ -270,6 +270,7 @@ export class SlicedStore {
 
     /** Restore from snapshot */
     restore(data: Record<string, unknown>): void {
+        let anyRestored = false;
         for (const [name, sliceData] of Object.entries(data)) {
             const record = this._slices.get(name);
             if (record && typeof sliceData === 'object' && sliceData !== null) {
@@ -284,11 +285,13 @@ export class SlicedStore {
                     );
                 }
                 record.state = clonedData;
-                this._emitFieldSignals(record, oldState, record.state);
-                record.signal.emit({ ...record.state });
+                this._notifySliceChange(name, record, oldState);
+                anyRestored = true;
             }
         }
-        this.onChange.emit(this.getFullState());
+        if (!this._batching && anyRestored) {
+            this.onChange.emit(this.getFullState());
+        }
     }
 
     /** List all registered slice names */
@@ -314,13 +317,16 @@ export class SlicedStore {
 
     /** Reset all slices to defaults but keep subscriptions */
     resetState(): void {
-        for (const record of this._slices.values()) {
+        let anyReset = false;
+        for (const [name, record] of this._slices) {
             const oldState = record.state;
             record.state = structuredClone(record.definition.defaults);
-            this._emitFieldSignals(record, oldState, record.state);
-            record.signal.emit({ ...record.state });
+            this._notifySliceChange(name, record, oldState);
+            anyReset = true;
         }
-        this.onChange.emit(this.getFullState());
+        if (!this._batching && anyReset) {
+            this.onChange.emit(this.getFullState());
+        }
     }
 
     /** Unregister a slice (for dynamic features / cleanup) */
@@ -343,12 +349,17 @@ export class SlicedStore {
 
             get<K extends keyof T & string>(key: K): T[K] {
                 const record = store._getRecord(name);
-                return record.state[key] as T[K];
+                const value = record.state[key];
+                // Clone non-primitives to prevent external mutation of internal state
+                if (typeof value === 'object' && value !== null) {
+                    return structuredClone(value) as T[K];
+                }
+                return value as T[K];
             },
 
             getAll(): Readonly<T> {
                 const record = store._getRecord(name);
-                return { ...record.state } as T;
+                return structuredClone(record.state) as T;
             },
 
             update(partial: Partial<T>): void {
@@ -385,8 +396,8 @@ export class SlicedStore {
 
             computed<R>(fn: (state: Readonly<T>) => R): ComputedSignal<R> {
                 const record = store._getRecord(name);
-                const derived = new ComputedSignal<R>(() => binding.detach());
                 let lastValue = fn(record.state as T);
+                const derived = new ComputedSignal<R>(lastValue, () => binding.detach());
 
                 const binding = record.signal.add((state) => {
                     const next = fn(state as T);
@@ -415,6 +426,7 @@ export class SlicedStore {
         });
     }
 
+    /** Emit field-level signals for all changed keys between old and new state */
     private _emitFieldSignals(
         record: SliceRecord,
         oldState: SliceState,
@@ -428,6 +440,40 @@ export class SlicedStore {
                     signal.emit({ value: newState[key], prev: oldState[key] });
                 }
             }
+        }
+    }
+
+    /** Handle field/slice signal emission or deferral for a state replacement */
+    private _notifySliceChange(
+        name: string,
+        record: SliceRecord,
+        oldState: SliceState,
+    ): void {
+        if (this._batching) {
+            if (!this._batchSnapshot.has(name)) {
+                this._batchSnapshot.set(name, oldState);
+            }
+            // Accumulate field changes for deferred emission
+            let pendingFields = this._batchPendingFields.get(name);
+            if (!pendingFields) {
+                pendingFields = new Map();
+                this._batchPendingFields.set(name, pendingFields);
+            }
+            const allKeys = new Set([...Object.keys(oldState), ...Object.keys(record.state)]);
+            for (const key of allKeys) {
+                if (!Object.is(oldState[key], record.state[key])) {
+                    const existing = pendingFields.get(key);
+                    if (existing) {
+                        existing.value = record.state[key];
+                    } else {
+                        pendingFields.set(key, { value: record.state[key], prev: oldState[key] });
+                    }
+                }
+            }
+            this._batchDirtySlices.add(name);
+        } else {
+            this._emitFieldSignals(record, oldState, record.state);
+            record.signal.emit({ ...record.state });
         }
     }
 
@@ -455,19 +501,30 @@ export class SlicedStore {
             if (processed === null) return;
         }
 
-        // Snapshot pre-batch state on first mutation per slice (for rollback)
+        // Snapshot pre-batch state on first mutation per slice (deep copy for rollback)
         if (this._batching && !this._batchSnapshot.has(name)) {
-            this._batchSnapshot.set(name, { ...record.state });
+            this._batchSnapshot.set(name, structuredClone(record.state));
+        }
+
+        // Clone incoming values to prevent external mutation of internal state
+        let clonedProcessed: Partial<SliceState>;
+        try {
+            clonedProcessed = structuredClone(processed!);
+        } catch (err) {
+            throw new Error(
+                `Slice "${name}": update values must be structuredClone-able (no functions, Symbols, DOM nodes, etc.)`,
+                { cause: err },
+            );
         }
 
         // Diff
         const prev = { ...record.state };
         const changedKeys: string[] = [];
 
-        for (const key of Object.keys(processed!)) {
-            if (!Object.is(record.state[key], processed![key])) {
+        for (const key of Object.keys(clonedProcessed)) {
+            if (!Object.is(record.state[key], clonedProcessed[key])) {
                 changedKeys.push(key);
-                record.state[key] = processed![key];
+                record.state[key] = clonedProcessed[key];
             }
         }
 
