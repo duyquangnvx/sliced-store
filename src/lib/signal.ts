@@ -36,7 +36,7 @@ interface BindingEntry<T> {
  * ```
  */
 export class Signal<T = void> {
-    private bindings: Set<BindingEntry<T>> = new Set();
+    private readonly bindings: Set<BindingEntry<T>> = new Set();
 
     /**
      * Add listener. Returns a SignalBinding to detach later.
@@ -78,7 +78,8 @@ export class Signal<T = void> {
     emit(value: T): void {
         let firstError: unknown;
         let hasError = false;
-        for (const entry of this.bindings) {
+        const snapshot = [...this.bindings];
+        for (const entry of snapshot) {
             if (entry.once) {
                 this.bindings.delete(entry);
             }

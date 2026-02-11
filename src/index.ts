@@ -123,9 +123,9 @@ interface SliceRecord {
 export class SlicedStore {
     private readonly _slices = new Map<string, SliceRecord>();
     private _batching = false;
-    private _batchDirtySlices = new Set<string>();
-    private _batchPendingFields = new Map<string, Map<string, { value: unknown; prev: unknown }>>();
-    private _batchSnapshot = new Map<string, SliceState>();
+    private readonly _batchDirtySlices = new Set<string>();
+    private readonly _batchPendingFields = new Map<string, Map<string, { value: unknown; prev: unknown }>>();
+    private readonly _batchSnapshot = new Map<string, SliceState>();
 
     /** Fires when ANY slice changes. Payload = full merged state of all slices. */
     readonly onChange = new Signal<Readonly<Record<string, unknown>>>();
@@ -236,7 +236,7 @@ export class SlicedStore {
         for (const name of this._batchDirtySlices) {
             const record = this._slices.get(name);
             if (record) {
-                record.signal.emit({ ...record.state });
+                record.signal.emit(structuredClone(record.state));
             }
         }
 
@@ -256,7 +256,7 @@ export class SlicedStore {
     getFullState(): Readonly<Record<string, unknown>> {
         const result: Record<string, unknown> = {};
         for (const [name, record] of this._slices) {
-            result[name] = { ...record.state };
+            result[name] = structuredClone(record.state);
         }
         return Object.freeze(result);
     }
@@ -286,7 +286,7 @@ export class SlicedStore {
                         { cause: err },
                     );
                 }
-                record.state = clonedData;
+                record.state = { ...structuredClone(record.definition.defaults), ...clonedData };
                 this._notifySliceChange(name, record, oldState);
                 anyRestored = true;
             }
@@ -424,67 +424,14 @@ export class SlicedStore {
     private _createReadonlyHandle<T extends SliceState>(
         name: string,
     ): Readonly<Pick<SliceHandle<T>, 'get' | 'getAll' | 'on' | 'onChange' | 'computed' | 'name'>> {
-        const store = this;
-
+        const full = this._createHandle<T>(name);
         return Object.freeze({
-            name,
-
-            get<K extends keyof T & string>(key: K): T[K] {
-                const record = store._getRecord(name);
-                const value = record.state[key];
-                if (typeof value === 'object' && value !== null) {
-                    return structuredClone(value) as T[K];
-                }
-                return value as T[K];
-            },
-
-            getAll(): Readonly<T> {
-                const record = store._getRecord(name);
-                return structuredClone(record.state) as T;
-            },
-
-            on<K extends keyof T & string>(
-                key: K,
-                callback: (value: T[K], prev: T[K]) => void,
-            ): () => void {
-                const record = store._getRecord(name);
-                let signal = record.fieldSignals.get(key);
-                if (!signal) {
-                    signal = new Signal<FieldSignalPayload<SliceState, string>>();
-                    record.fieldSignals.set(key, signal);
-                }
-
-                const wrapper = (payload: FieldSignalPayload<SliceState, string>) => {
-                    callback(payload.value as T[K], payload.prev as T[K]);
-                };
-
-                signal.add(wrapper);
-                return () => signal!.remove(wrapper);
-            },
-
-            get onChange(): Signal<Readonly<T>> {
-                return store._getRecord(name).signal as unknown as Signal<Readonly<T>>;
-            },
-
-            computed<R>(fn: (state: Readonly<T>) => R): ComputedSignal<R> {
-                const record = store._getRecord(name);
-                let lastValue = fn(record.state as T);
-                const derived = new ComputedSignal<R>(lastValue, () => {
-                    binding.detach();
-                    record.computedSignals.delete(derived as ComputedSignal<unknown>);
-                });
-
-                const binding = record.signal.add((state) => {
-                    const next = fn(state as T);
-                    if (!Object.is(next, lastValue)) {
-                        lastValue = next;
-                        derived.emit(next);
-                    }
-                });
-
-                record.computedSignals.add(derived as ComputedSignal<unknown>);
-                return derived;
-            },
+            name: full.name,
+            get: full.get,
+            getAll: full.getAll,
+            on: full.on,
+            get onChange() { return full.onChange; },
+            computed: full.computed,
         });
     }
 
@@ -505,6 +452,29 @@ export class SlicedStore {
         }
     }
 
+    /** Accumulate changed fields into the batch pending map */
+    private _accumulateBatchFields(
+        name: string,
+        changedKeys: string[],
+        oldState: SliceState,
+        newState: SliceState,
+    ): void {
+        let pendingFields = this._batchPendingFields.get(name);
+        if (!pendingFields) {
+            pendingFields = new Map();
+            this._batchPendingFields.set(name, pendingFields);
+        }
+        for (const key of changedKeys) {
+            const existing = pendingFields.get(key);
+            if (existing) {
+                existing.value = newState[key];
+            } else {
+                pendingFields.set(key, { value: newState[key], prev: oldState[key] });
+            }
+        }
+        this._batchDirtySlices.add(name);
+    }
+
     /** Handle field/slice signal emission or deferral for a state replacement */
     private _notifySliceChange(
         name: string,
@@ -515,27 +485,14 @@ export class SlicedStore {
             if (!this._batchSnapshot.has(name)) {
                 this._batchSnapshot.set(name, oldState);
             }
-            // Accumulate field changes for deferred emission
-            let pendingFields = this._batchPendingFields.get(name);
-            if (!pendingFields) {
-                pendingFields = new Map();
-                this._batchPendingFields.set(name, pendingFields);
-            }
             const allKeys = new Set([...Object.keys(oldState), ...Object.keys(record.state)]);
-            for (const key of allKeys) {
-                if (!Object.is(oldState[key], record.state[key])) {
-                    const existing = pendingFields.get(key);
-                    if (existing) {
-                        existing.value = record.state[key];
-                    } else {
-                        pendingFields.set(key, { value: record.state[key], prev: oldState[key] });
-                    }
-                }
-            }
-            this._batchDirtySlices.add(name);
+            const changedKeys = [...allKeys].filter(
+                (key) => !Object.is(oldState[key], record.state[key]),
+            );
+            this._accumulateBatchFields(name, changedKeys, oldState, record.state);
         } else {
             this._emitFieldSignals(record, oldState, record.state);
-            record.signal.emit({ ...record.state });
+            record.signal.emit(structuredClone(record.state));
         }
     }
 
@@ -596,21 +553,7 @@ export class SlicedStore {
 
         // During batch: accumulate field changes, defer all signals
         if (this._batching) {
-            let pendingFields = this._batchPendingFields.get(name);
-            if (!pendingFields) {
-                pendingFields = new Map();
-                this._batchPendingFields.set(name, pendingFields);
-            }
-            for (const key of changedKeys) {
-                const existing = pendingFields.get(key);
-                if (existing) {
-                    // Keep original prev, update value to latest
-                    existing.value = record.state[key];
-                } else {
-                    pendingFields.set(key, { value: record.state[key], prev: prev[key] });
-                }
-            }
-            this._batchDirtySlices.add(name);
+            this._accumulateBatchFields(name, changedKeys, prev, record.state);
             return;
         }
 
@@ -623,7 +566,7 @@ export class SlicedStore {
         }
 
         // Slice-level signal
-        record.signal.emit({ ...record.state });
+        record.signal.emit(structuredClone(record.state));
 
         // Global signal
         this.onChange.emit(this.getFullState());
