@@ -21,13 +21,13 @@ Centralized state management with feature-owned slices. Each feature declares it
 ## Install
 
 ```bash
-npm install sliced-store
+npm install @duyquangnvx/sliced-store
 ```
 
 ## Quick start
 
 ```ts
-import { SlicedStore, defineSlice } from 'sliced-store';
+import { SlicedStore, defineSlice } from '@duyquangnvx/sliced-store';
 
 // 1. Define slices (each feature owns its shape)
 const walletSlice = defineSlice('wallet', {

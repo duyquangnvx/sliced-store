@@ -1,5 +1,5 @@
 {
-  "name": "sliced-store",
+  "name": "@duyquangnvx/sliced-store",
   "version": "1.0.0",
   "description": "Centralized store with feature-owned slices",
   "type": "module",
@@ -30,6 +30,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/duyquangnvx/sliced-store.git"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [],
   "author": "",
