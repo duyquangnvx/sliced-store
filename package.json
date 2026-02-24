@@ -1,6 +1,6 @@
 {
   "name": "@duyquangnvx/sliced-store",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Centralized store with feature-owned slices",
   "type": "module",
   "main": "./dist/index.cjs",
