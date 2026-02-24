@@ -46,7 +46,7 @@ const spin = store.register(spinSlice);
 // 3. Read and write through typed handles
 wallet.get('balance');    // 1000 (typed as number)
 wallet.set('bet', 10);
-wallet.update({ balance: 500, bet: 5 });
+wallet.batch({ balance: 500, bet: 5 });
 wallet.getAll();          // { balance: 500, bet: 5 }
 ```
 
@@ -79,7 +79,7 @@ Throws if a slice with the same name is already registered.
 
 #### `slice(name)`
 
-Get a **readonly** handle to another slice for cross-feature reads. The returned object is `Object.freeze`d with no `set` or `update` methods.
+Get a **readonly** handle to another slice. The returned object is `Object.freeze`d with read and subscribe methods only (`get`, `getAll`, `on`, `onChange`, `computed`, `name`) — no `set` or `batch`.
 
 ```ts
 const walletView = store.slice<WalletState>('wallet');
@@ -89,7 +89,7 @@ walletView.set('bet', 10);  // TypeError — property doesn't exist
 
 #### `batch(fn)`
 
-Batch multiple updates. All signals (field, slice, global) fire once at the end.
+Batch multiple updates. All notifications (field, slice, global) fire once at the end.
 
 ```ts
 store.batch(() => {
@@ -97,10 +97,10 @@ store.batch(() => {
     wallet.set('balance', 500);
     spin.set('remaining', 0);
 });
-// One set of signals fires here, not three
+// One set of notifications fires here, not three
 ```
 
-If `fn` throws, all state mutations are **rolled back** and no signals fire:
+If `fn` throws, all state mutations are **rolled back** and no notifications fire:
 
 ```ts
 store.batch(() => {
@@ -112,18 +112,18 @@ wallet.get('bet'); // still 1 — rolled back
 
 Nested `batch()` calls run inline within the outer batch.
 
-#### `getFullState()`
+#### `getState()`
 
-Returns a frozen object with all slices namespaced by name.
+Returns a frozen, deep-cloned object with all slices namespaced by name.
 
 ```ts
-store.getFullState();
+store.getState();
 // { wallet: { balance: 1000, bet: 1 }, spin: { remaining: 5, ... } }
 ```
 
 #### `snapshot()` / `restore(data)`
 
-Deep clone state for save/load. `restore` fires field and slice signals.
+Deep clone state for save/load. `restore` fires field and slice notifications.
 
 ```ts
 const saved = store.snapshot();
@@ -131,7 +131,7 @@ const saved = store.snapshot();
 store.restore(saved);
 ```
 
-Both methods are batch-aware — calling `restore` inside `batch()` defers signals.
+Both methods are batch-aware — calling `restore` inside `batch()` defers notifications.
 
 #### `resetState()`
 
@@ -139,20 +139,35 @@ Reset all slices to their defaults. Subscriptions are preserved. Batch-aware.
 
 #### `reset()`
 
-Reset all slices to defaults **and** clear all subscriptions.
+Reset all slices to defaults **and** clear all subscriptions (including store-level listeners).
 
 #### `unregister(name)`
 
 Remove a slice and clear its subscriptions.
 
-#### `onChange`
+#### `has(name)`
 
-Global signal that fires when any slice changes. Payload is the full merged state.
+Check if a slice is registered. Returns `boolean`.
+
+#### `sliceNames`
+
+Getter that returns an array of all registered slice names.
 
 ```ts
-store.onChange.add((fullState) => {
+store.sliceNames; // ['wallet', 'spin']
+```
+
+#### `onChange(listener)`
+
+Subscribe to changes across all slices. Callback receives the full merged state. Returns an unsubscribe function.
+
+```ts
+const unsub = store.onChange((fullState) => {
     console.log('Something changed:', fullState);
 });
+
+// Later
+unsub();
 ```
 
 ### `SliceHandle`
@@ -161,13 +176,14 @@ The typed handle returned by `register()`.
 
 | Method | Description |
 |--------|-------------|
-| `get(key)` | Get a single field value (cloned for objects) |
+| `get(key)` | Get a single field value |
 | `getAll()` | Get full slice state snapshot (deep clone) |
-| `set(key, value)` | Set a single field |
-| `update(partial)` | Merge partial state |
+| `set(key, value)` | Set a single field. Returns `false` if rejected by middleware |
+| `batch(partial)` | Set multiple fields. Returns array of rejected keys |
+| `reset()` | Reset all fields to their defaults via `set()` |
 | `on(key, callback)` | Subscribe to a field. Returns unsubscribe fn. Callback receives `(value, prev)` |
-| `onChange` | Signal that fires on any field change in this slice |
-| `computed(fn)` | Create a derived signal (see below) |
+| `onChange(callback)` | Subscribe to any field change in this slice. Returns unsubscribe fn |
+| `computed(fn)` | Create a derived value (see below) |
 | `name` | The slice name |
 
 ### Field subscriptions
@@ -181,29 +197,29 @@ const unsub = wallet.on('balance', (value, prev) => {
 unsub();
 ```
 
-### Computed signals
+### Computed values
 
-Derived values that only emit when the computed result actually changes.
+Derived values that only notify when the computed result actually changes.
 
 ```ts
 const isRich = wallet.computed((state) => state.balance > 500);
 
 isRich.value;  // current value: true
 
-isRich.add((val) => console.log('Rich status:', val));
+const unsub = isRich.onChange((val) => console.log('Rich status:', val));
 
 // Clean up when done
 isRich.dispose();
 ```
 
-`dispose()` detaches from the source signal and clears all listeners. After disposal, `add()` and `once()` throw, `emit()` is a no-op.
+`dispose()` detaches from the source and clears all listeners. After disposal, `onChange()` throws and `isDisposed` returns `true`.
 
 ### Middleware
 
 Middleware intercepts updates before they are applied. Each middleware receives the current state and incoming partial, and can transform or block the update.
 
 ```ts
-const balanceGuard: SliceMiddleware<WalletState> = (current, incoming) => {
+const balanceGuard: Middleware<WalletState> = (current, incoming) => {
     // Prevent negative balance
     if (incoming.balance !== undefined && incoming.balance < 0) {
         return { ...incoming, balance: 0 };
@@ -212,7 +228,7 @@ const balanceGuard: SliceMiddleware<WalletState> = (current, incoming) => {
 };
 
 // Return null to block the update entirely
-const freezeBet: SliceMiddleware<WalletState> = (current, incoming) => {
+const freezeBet: Middleware<WalletState> = (current, incoming) => {
     if (incoming.bet !== undefined) return null;
     return incoming;
 };
@@ -225,33 +241,13 @@ const slice = defineSlice('wallet', {
 
 Middleware errors are wrapped with context (middleware name, slice name, original error as `cause`).
 
-### Signal
-
-Lightweight pub/sub primitive used internally and exported for direct use.
-
-```ts
-import { Signal } from 'sliced-store';
-
-const signal = new Signal<number>();
-
-const binding = signal.add((value) => console.log(value));
-signal.once((value) => console.log('First only:', value));
-signal.emit(42);
-
-binding.detach();  // or binding.dispose()
-signal.clear();    // remove all listeners
-```
-
-Error isolation: if a listener throws, all remaining listeners still run. The first error is re-thrown after all listeners have been called.
-
 ## Safety guarantees
 
-- **Defensive cloning** — all values are `structuredClone`d at boundaries (register, set, update, get, getAll, restore, snapshot, reset). External code cannot silently mutate internal store state.
-- **Batch rollback** — if `batch()` throws, all mutations are rolled back using deep snapshots. No signals fire.
+- **Defensive cloning** — defaults are `structuredClone`d at registration. `getAll()`, `getState()`, `snapshot()`, `restore()`, and `resetState()` deep-clone at boundaries. External code cannot silently mutate internal store state through these methods.
+- **Batch rollback** — if `batch()` throws, all mutations are rolled back using deep snapshots. No notifications fire.
 - **Readonly handles** — `slice()` returns a runtime-frozen object with no write methods.
 - **Middleware isolation** — errors include middleware name/index, slice name, and the original error as `cause`.
-- **Signal error isolation** — one throwing listener does not prevent others from running.
-- **ComputedSignal guards** — `add`/`once` throw after disposal, `emit` is a no-op.
+- **Computed guards** — `onChange()` throws after disposal, `isDisposed` indicates state.
 
 ## Development
 
