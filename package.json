@@ -1,7 +1,7 @@
 {
   "name": "@duyquangnvx/sliced-store",
-  "version": "1.0.1",
-  "description": "Centralized store with feature-owned slices",
+  "version": "2.0.0",
+  "description": "Feature-sliced state management for game and real-time UI",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
