@@ -204,6 +204,41 @@ export function createStore<D extends Record<string, SliceDefinition<any>>>(defs
         handles.set(name, new SliceHandle(name, state, deepFreeze(clonedDefaults), batch));
     }
 
+    function notifySliceChanges(
+        name: string,
+        handle: SliceHandle<any>,
+        oldState: Record<string, unknown>,
+    ): void {
+        const newState = handle._getState() as Record<string, unknown>;
+        const allKeys = new Set([...Object.keys(oldState), ...Object.keys(newState)]);
+
+        if (batch.active) {
+            batch.dirtySlices.add(name);
+            let fields = batch.pendingFields.get(name);
+            if (!fields) {
+                fields = new Map();
+                batch.pendingFields.set(name, fields);
+            }
+            for (const key of allKeys) {
+                if (!Object.is(oldState[key], newState[key])) {
+                    const existing = fields.get(key);
+                    if (existing) {
+                        existing.value = newState[key];
+                    } else {
+                        fields.set(key, { prev: oldState[key], value: newState[key] });
+                    }
+                }
+            }
+        } else {
+            for (const key of allKeys) {
+                if (!Object.is(oldState[key], newState[key])) {
+                    handle._flushField(key, newState[key], oldState[key]);
+                }
+            }
+            handle._flushSlice();
+        }
+    }
+
     return {
         handle<K extends keyof D & string>(name: K): SliceHandle<InferState<D[K]>> {
             return handles.get(name)! as SliceHandle<InferState<D[K]>>;
@@ -264,6 +299,58 @@ export function createStore<D extends Record<string, SliceDefinition<any>>>(defs
             batch.snapshots.clear();
             batch.dirtySlices.clear();
             batch.pendingFields.clear();
+        },
+
+        snapshot(): { [K in keyof D & string]: InferState<D[K]> } {
+            const result: Record<string, unknown> = {};
+            for (const [name, handle] of handles) {
+                result[name] = structuredClone(handle._getState());
+            }
+            return result as { [K in keyof D & string]: InferState<D[K]> };
+        },
+
+        restore(data: Partial<{ [K in keyof D & string]: Partial<InferState<D[K]>> }>): void {
+            for (const [name, sliceData] of Object.entries(data)) {
+                const handle = handles.get(name);
+                if (!handle || typeof sliceData !== 'object' || sliceData === null) continue;
+
+                const oldState = handle._getState() as Record<string, unknown>;
+
+                if (batch.active && !batch.snapshots.has(name)) {
+                    batch.snapshots.set(name, oldState);
+                }
+
+                let clonedData: Record<string, unknown>;
+                try {
+                    clonedData = structuredClone(sliceData) as Record<string, unknown>;
+                } catch (err) {
+                    throw new Error(
+                        `Slice "${name}": restore data must be structuredClone-able`,
+                        { cause: err },
+                    );
+                }
+
+                const newState = deepFreeze({
+                    ...structuredClone(handle._getDefaults()),
+                    ...clonedData,
+                });
+                handle._setState(newState as any);
+                notifySliceChanges(name, handle, oldState);
+            }
+        },
+
+        reset(): void {
+            for (const [name, handle] of handles) {
+                const oldState = handle._getState() as Record<string, unknown>;
+
+                if (batch.active && !batch.snapshots.has(name)) {
+                    batch.snapshots.set(name, oldState);
+                }
+
+                const newState = deepFreeze(structuredClone(handle._getDefaults()));
+                handle._setState(newState as any);
+                notifySliceChanges(name, handle, oldState);
+            }
         },
     };
 }

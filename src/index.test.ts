@@ -514,3 +514,174 @@ describe('store.batch', () => {
         expect(fn).toHaveBeenCalledTimes(1);
     });
 });
+
+// ─── store.snapshot / restore ───
+
+describe('store.snapshot / restore', () => {
+    it('snapshot returns deep cloned state', () => {
+        const store = createStore({ test: defineSlice({ items: [1, 2] }) });
+        const h = store.handle('test');
+        const snap = store.snapshot();
+        h.set('items', [3, 4]);
+        expect((snap as any).test.items).toEqual([1, 2]);
+    });
+
+    it('snapshot is not frozen (for serialization)', () => {
+        const store = createStore({ wallet: walletDef });
+        const snap = store.snapshot();
+        expect(Object.isFrozen(snap)).toBe(false);
+    });
+
+    it('restore round-trips through snapshot', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        w.set('bet', 50);
+        const snap = store.snapshot();
+        w.set('bet', 99);
+        store.restore(snap);
+        expect(w.get('bet')).toBe(50);
+    });
+
+    it('restore fires field signals', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.on('bet', fn);
+        store.restore({ wallet: { balance: 1000, bet: 50, currency: 'USD' } });
+        expect(fn).toHaveBeenCalledWith(50, 1);
+    });
+
+    it('restore fires slice onChange', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.onChange(fn);
+        store.restore({ wallet: { balance: 500 } });
+        expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('restore state is frozen', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        store.restore({ wallet: { balance: 500, bet: 10, currency: 'EUR' } });
+        expect(Object.isFrozen(w.getAll())).toBe(true);
+    });
+
+    it('restore skips unknown slice keys', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        store.restore({ unknown: { x: 1 } } as any);
+        expect(w.get('balance')).toBe(1000);
+    });
+
+    it('restore merges with defaults (forward compatible)', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        store.restore({ wallet: { bet: 50 } });
+        expect(w.get('bet')).toBe(50);
+        expect(w.get('balance')).toBe(1000);
+        expect(w.get('currency')).toBe('USD');
+    });
+
+    it('restore throws for non-cloneable data', () => {
+        const store = createStore({ wallet: walletDef });
+        expect(() => {
+            store.restore({ wallet: { balance: 1, bet: 1, currency: 'X', bad: () => {} } } as any);
+        }).toThrow('structuredClone-able');
+    });
+
+    it('restore is batch-aware — defers signals', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fieldFn = vi.fn();
+        const sliceFn = vi.fn();
+        w.on('bet', fieldFn);
+        w.onChange(sliceFn);
+        store.batch(() => {
+            store.restore({ wallet: { balance: 500, bet: 50, currency: 'EUR' } });
+            expect(fieldFn).not.toHaveBeenCalled();
+            expect(sliceFn).not.toHaveBeenCalled();
+        });
+        expect(fieldFn).toHaveBeenCalled();
+        expect(sliceFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('restore rolls back on error when inside batch', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        expect(() => {
+            store.batch(() => {
+                store.restore({ wallet: { balance: 0, bet: 0, currency: 'X' } });
+                throw new Error('abort');
+            });
+        }).toThrow('abort');
+        expect(w.get('balance')).toBe(1000);
+        expect(w.get('bet')).toBe(1);
+    });
+});
+
+// ─── store.reset ───
+
+describe('store.reset', () => {
+    it('resets all slices to defaults', () => {
+        const store = createStore({ wallet: walletDef, spin: spinDef });
+        const w = store.handle('wallet');
+        const s = store.handle('spin');
+        w.set('bet', 99);
+        s.set('remaining', 0);
+        store.reset();
+        expect(w.get('bet')).toBe(1);
+        expect(s.get('remaining')).toBe(5);
+    });
+
+    it('keeps subscriptions', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        w.set('bet', 99);
+        const fn = vi.fn();
+        w.onChange(fn);
+        store.reset();
+        expect(fn).toHaveBeenCalledTimes(1);
+        w.set('bet', 5);
+        expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    it('fires field signals on reset', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        w.set('bet', 50);
+        const fn = vi.fn();
+        w.on('bet', fn);
+        fn.mockClear();
+        store.reset();
+        expect(fn).toHaveBeenCalledWith(1, 50);
+    });
+
+    it('state is frozen after reset', () => {
+        const store = createStore({ test: defineSlice({ obj: { a: 1 } }) });
+        const h = store.handle('test');
+        h.set('obj', { a: 99 });
+        store.reset();
+        expect(Object.isFrozen(h.getAll())).toBe(true);
+        expect(Object.isFrozen(h.get('obj'))).toBe(true);
+    });
+
+    it('is batch-aware — defers signals', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        w.set('bet', 50);
+        const fieldFn = vi.fn();
+        const sliceFn = vi.fn();
+        w.on('bet', fieldFn);
+        w.onChange(sliceFn);
+        fieldFn.mockClear();
+        sliceFn.mockClear();
+        store.batch(() => {
+            store.reset();
+            expect(fieldFn).not.toHaveBeenCalled();
+            expect(sliceFn).not.toHaveBeenCalled();
+        });
+        expect(fieldFn).toHaveBeenCalledWith(1, 50);
+        expect(sliceFn).toHaveBeenCalledTimes(1);
+    });
+});
