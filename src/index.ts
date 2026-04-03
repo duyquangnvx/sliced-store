@@ -188,6 +188,7 @@ export function createStore<D extends Record<string, SliceDefinition<any>>>(defs
     };
 
     const handles = new Map<string, SliceHandle<any>>();
+    const readonlyCache = new Map<string, ReadonlySlice<any>>();
 
     for (const [name, def] of Object.entries(defs)) {
         let clonedDefaults: Record<string, unknown>;
@@ -206,6 +207,20 @@ export function createStore<D extends Record<string, SliceDefinition<any>>>(defs
     return {
         handle<K extends keyof D & string>(name: K): SliceHandle<InferState<D[K]>> {
             return handles.get(name)! as SliceHandle<InferState<D[K]>>;
+        },
+        slice<K extends keyof D & string>(name: K): ReadonlySlice<InferState<D[K]>> {
+            let cached = readonlyCache.get(name);
+            if (!cached) {
+                const handle = handles.get(name)!;
+                cached = Object.freeze({
+                    get: handle.get.bind(handle),
+                    getAll: handle.getAll.bind(handle),
+                    on: handle.on.bind(handle),
+                    onChange: handle.onChange.bind(handle),
+                });
+                readonlyCache.set(name, cached);
+            }
+            return cached as ReadonlySlice<InferState<D[K]>>;
         },
     };
 }

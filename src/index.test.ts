@@ -296,3 +296,57 @@ describe('handle.merge', () => {
         expect(Object.isFrozen(h.get('obj'))).toBe(true);
     });
 });
+
+// ─── store.slice (readonly) ───
+
+describe('store.slice (readonly)', () => {
+    it('can read state via get', () => {
+        const store = createStore({ wallet: walletDef });
+        const ro = store.slice('wallet');
+        expect(ro.get('balance')).toBe(1000);
+    });
+
+    it('can read full state via getAll', () => {
+        const store = createStore({ wallet: walletDef });
+        const ro = store.slice('wallet');
+        expect(ro.getAll()).toEqual({ balance: 1000, bet: 1, currency: 'USD' });
+    });
+
+    it('can subscribe to field changes', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const ro = store.slice('wallet');
+        const fn = vi.fn();
+        ro.on('balance', fn);
+        w.set('balance', 500);
+        expect(fn).toHaveBeenCalledWith(500, 1000);
+    });
+
+    it('can subscribe to slice changes', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const ro = store.slice('wallet');
+        const fn = vi.fn();
+        ro.onChange(fn);
+        w.set('bet', 10);
+        expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('has no set or merge methods', () => {
+        const store = createStore({ wallet: walletDef });
+        const ro = store.slice('wallet') as any;
+        expect(ro.set).toBeUndefined();
+        expect(ro.merge).toBeUndefined();
+    });
+
+    it('is frozen', () => {
+        const store = createStore({ wallet: walletDef });
+        const ro = store.slice('wallet');
+        expect(Object.isFrozen(ro)).toBe(true);
+    });
+
+    it('is cached — same instance each call', () => {
+        const store = createStore({ wallet: walletDef });
+        expect(store.slice('wallet')).toBe(store.slice('wallet'));
+    });
+});
