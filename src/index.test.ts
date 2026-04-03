@@ -685,3 +685,143 @@ describe('store.reset', () => {
         expect(sliceFn).toHaveBeenCalledTimes(1);
     });
 });
+
+// ─── Listener error isolation ───
+
+describe('listener error isolation', () => {
+    it('bad field listener does not break other field listeners', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn1 = vi.fn(() => { throw new Error('boom'); });
+        const fn2 = vi.fn();
+        w.on('bet', fn1);
+        w.on('bet', fn2);
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        w.set('bet', 10);
+        expect(fn1).toHaveBeenCalled();
+        expect(fn2).toHaveBeenCalledWith(10, 1);
+        expect(spy).toHaveBeenCalled();
+        spy.mockRestore();
+    });
+
+    it('bad field listener does not break slice listener', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        w.on('bet', () => { throw new Error('boom'); });
+        const sliceFn = vi.fn();
+        w.onChange(sliceFn);
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        w.set('bet', 10);
+        expect(sliceFn).toHaveBeenCalledTimes(1);
+        spy.mockRestore();
+    });
+
+    it('bad slice listener does not break other slice listeners', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn1 = vi.fn(() => { throw new Error('boom'); });
+        const fn2 = vi.fn();
+        w.onChange(fn1);
+        w.onChange(fn2);
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        w.set('bet', 10);
+        expect(fn1).toHaveBeenCalled();
+        expect(fn2).toHaveBeenCalledTimes(1);
+        spy.mockRestore();
+    });
+});
+
+// ─── Edge cases ───
+
+describe('edge cases', () => {
+    it('batch + restore + additional mutations', () => {
+        const store = createStore({ wallet: walletDef, spin: spinDef });
+        const w = store.handle('wallet');
+        const s = store.handle('spin');
+        const walletFn = vi.fn();
+        const spinFn = vi.fn();
+        w.on('bet', walletFn);
+        s.on('remaining', spinFn);
+        store.batch(() => {
+            store.restore({ wallet: { balance: 200, bet: 20, currency: 'EUR' } });
+            s.set('remaining', 1);
+        });
+        expect(w.get('bet')).toBe(20);
+        expect(s.get('remaining')).toBe(1);
+        expect(walletFn).toHaveBeenCalledWith(20, 1);
+        expect(spinFn).toHaveBeenCalledWith(1, 5);
+    });
+
+    it('readonly slice updates when handle writes', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const ro = store.slice('wallet');
+        const fn = vi.fn();
+        ro.on('bet', fn);
+        w.set('bet', 100);
+        expect(ro.get('bet')).toBe(100);
+        expect(fn).toHaveBeenCalledWith(100, 1);
+    });
+
+    it('multiple slices in batch with field listeners', () => {
+        const store = createStore({ wallet: walletDef, spin: spinDef });
+        const w = store.handle('wallet');
+        const s = store.handle('spin');
+        const wBet = vi.fn();
+        const sRem = vi.fn();
+        w.on('bet', wBet);
+        s.on('remaining', sRem);
+        store.batch(() => {
+            w.set('bet', 10);
+            s.set('remaining', 0);
+        });
+        expect(wBet).toHaveBeenCalledWith(10, 1);
+        expect(sRem).toHaveBeenCalledWith(0, 5);
+    });
+
+    it('deep rollback for nested objects', () => {
+        const store = createStore({ test: defineSlice({ obj: { a: 1, b: 2 } }) });
+        const h = store.handle('test');
+        expect(() => {
+            store.batch(() => {
+                h.set('obj', { a: 99, b: 99 });
+                throw new Error('abort');
+            });
+        }).toThrow('abort');
+        expect(h.get('obj')).toEqual({ a: 1, b: 2 });
+    });
+
+    it('merge inside batch with rollback', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        expect(() => {
+            store.batch(() => {
+                w.merge({ balance: 0, bet: 99 });
+                throw new Error('abort');
+            });
+        }).toThrow('abort');
+        expect(w.get('balance')).toBe(1000);
+        expect(w.get('bet')).toBe(1);
+    });
+
+    it('set after reset works normally', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        w.set('bet', 99);
+        store.reset();
+        w.set('bet', 5);
+        expect(w.get('bet')).toBe(5);
+    });
+
+    it('restore with partial data preserves other defaults', () => {
+        const store = createStore({ wallet: walletDef, spin: spinDef });
+        const w = store.handle('wallet');
+        const s = store.handle('spin');
+        w.set('bet', 50);
+        s.set('remaining', 0);
+        store.restore({ wallet: { balance: 999 } });
+        expect(w.get('balance')).toBe(999);
+        expect(w.get('bet')).toBe(1);
+        expect(s.get('remaining')).toBe(0);
+    });
+});

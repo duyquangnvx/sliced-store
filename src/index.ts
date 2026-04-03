@@ -163,13 +163,17 @@ export class SliceHandle<T extends Record<string, unknown>> {
     _flushField(key: string, value: unknown, prev: unknown): void {
         const subs = this._fieldListeners.get(key);
         if (subs) {
-            for (const fn of subs) fn(value, prev);
+            for (const fn of subs) {
+                try { fn(value, prev); } catch (e) { console.error(e); }
+            }
         }
     }
 
     /** @internal */
     _flushSlice(): void {
-        for (const fn of this._sliceListeners) fn(this._state);
+        for (const fn of this._sliceListeners) {
+            try { fn(this._state); } catch (e) { console.error(e); }
+        }
     }
 
     /** @internal */ _getState(): T { return this._state; }
