@@ -215,3 +215,84 @@ describe('handle.onChange (slice signal)', () => {
         expect(order).toEqual(['field', 'slice']);
     });
 });
+
+// ─── handle.merge ───
+
+describe('handle.merge', () => {
+    it('updates multiple fields at once', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        w.merge({ balance: 500, bet: 5 });
+        expect(w.get('balance')).toBe(500);
+        expect(w.get('bet')).toBe(5);
+        expect(w.get('currency')).toBe('USD');
+    });
+
+    it('fires field listeners for each changed field', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const balFn = vi.fn();
+        const betFn = vi.fn();
+        w.on('balance', balFn);
+        w.on('bet', betFn);
+        w.merge({ balance: 500, bet: 5 });
+        expect(balFn).toHaveBeenCalledWith(500, 1000);
+        expect(betFn).toHaveBeenCalledWith(5, 1);
+    });
+
+    it('fires slice onChange exactly once', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.onChange(fn);
+        w.merge({ balance: 500, bet: 5 });
+        expect(fn).toHaveBeenCalledTimes(1);
+        expect(fn.mock.calls[0][0]).toMatchObject({ balance: 500, bet: 5 });
+    });
+
+    it('notification order: all fields then slice', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const order: string[] = [];
+        w.on('balance', () => order.push('field:balance'));
+        w.on('bet', () => order.push('field:bet'));
+        w.onChange(() => order.push('slice'));
+        w.merge({ balance: 500, bet: 5 });
+        expect(order).toEqual(['field:balance', 'field:bet', 'slice']);
+    });
+
+    it('no-op on empty partial', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.onChange(fn);
+        w.merge({});
+        expect(fn).not.toHaveBeenCalled();
+    });
+
+    it('no-op when all values are same', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.onChange(fn);
+        w.merge({ balance: 1000, bet: 1 });
+        expect(fn).not.toHaveBeenCalled();
+    });
+
+    it('only fires for actually changed fields', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const balFn = vi.fn();
+        w.on('balance', balFn);
+        w.merge({ balance: 1000, bet: 5 }); // balance unchanged
+        expect(balFn).not.toHaveBeenCalled();
+    });
+
+    it('state is frozen after merge', () => {
+        const store = createStore({ test: defineSlice({ obj: { a: 1 }, num: 0 }) });
+        const h = store.handle('test');
+        h.merge({ obj: { a: 2 }, num: 5 });
+        expect(Object.isFrozen(h.getAll())).toBe(true);
+        expect(Object.isFrozen(h.get('obj'))).toBe(true);
+    });
+});

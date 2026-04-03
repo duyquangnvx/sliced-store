@@ -108,6 +108,52 @@ export class SliceHandle<T extends Record<string, unknown>> {
         this._flushSlice();
     }
 
+    merge(partial: Partial<T>): void {
+        const changes: Array<{ key: string; prev: unknown }> = [];
+        for (const key of Object.keys(partial)) {
+            const prev = this._state[key as keyof T];
+            const next = partial[key as keyof T];
+            if (!Object.is(prev, next)) {
+                changes.push({ key, prev });
+            }
+        }
+        if (changes.length === 0) return;
+
+        const update: Record<string, unknown> = {};
+        for (const { key } of changes) {
+            update[key] = partial[key as keyof T];
+        }
+        const newState = deepFreeze({ ...this._state, ...update } as T);
+
+        if (this._batch.active) {
+            if (!this._batch.snapshots.has(this._name)) {
+                this._batch.snapshots.set(this._name, this._state as Record<string, unknown>);
+            }
+            this._batch.dirtySlices.add(this._name);
+            let fields = this._batch.pendingFields.get(this._name);
+            if (!fields) {
+                fields = new Map();
+                this._batch.pendingFields.set(this._name, fields);
+            }
+            for (const { key, prev } of changes) {
+                const existing = fields.get(key);
+                if (existing) {
+                    existing.value = newState[key as keyof T];
+                } else {
+                    fields.set(key, { prev, value: newState[key as keyof T] });
+                }
+            }
+            this._state = newState;
+            return;
+        }
+
+        this._state = newState;
+        for (const { key, prev } of changes) {
+            this._flushField(key, newState[key as keyof T], prev);
+        }
+        this._flushSlice();
+    }
+
     onChange(listener: SliceListener<T>): Unsubscribe {
         this._sliceListeners.add(listener);
         return () => this._sliceListeners.delete(listener);
