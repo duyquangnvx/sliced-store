@@ -222,5 +222,48 @@ export function createStore<D extends Record<string, SliceDefinition<any>>>(defs
             }
             return cached as ReadonlySlice<InferState<D[K]>>;
         },
+
+        batch(fn: () => void): void {
+            if (batch.active) {
+                fn();
+                return;
+            }
+
+            batch.active = true;
+            batch.snapshots.clear();
+            batch.dirtySlices.clear();
+            batch.pendingFields.clear();
+
+            try {
+                fn();
+            } catch (err) {
+                for (const [name, snapshot] of batch.snapshots) {
+                    const handle = handles.get(name);
+                    if (handle) handle._setState(snapshot as any);
+                }
+                batch.active = false;
+                batch.snapshots.clear();
+                batch.dirtySlices.clear();
+                batch.pendingFields.clear();
+                throw err;
+            }
+
+            batch.active = false;
+
+            // Flush: per-slice (fields → slice)
+            for (const [name, fields] of batch.pendingFields) {
+                const handle = handles.get(name);
+                if (handle) {
+                    for (const [key, { value, prev }] of fields) {
+                        handle._flushField(key, value, prev);
+                    }
+                    handle._flushSlice();
+                }
+            }
+
+            batch.snapshots.clear();
+            batch.dirtySlices.clear();
+            batch.pendingFields.clear();
+        },
     };
 }

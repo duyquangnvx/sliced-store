@@ -350,3 +350,167 @@ describe('store.slice (readonly)', () => {
         expect(store.slice('wallet')).toBe(store.slice('wallet'));
     });
 });
+
+// ─── store.batch ───
+
+describe('store.batch', () => {
+    it('defers field signals to end of batch', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const balFn = vi.fn();
+        const betFn = vi.fn();
+        w.on('balance', balFn);
+        w.on('bet', betFn);
+        store.batch(() => {
+            w.set('balance', 500);
+            w.set('bet', 10);
+            expect(balFn).not.toHaveBeenCalled();
+            expect(betFn).not.toHaveBeenCalled();
+        });
+        expect(balFn).toHaveBeenCalledWith(500, 1000);
+        expect(betFn).toHaveBeenCalledWith(10, 1);
+    });
+
+    it('defers slice onChange to end of batch', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.onChange(fn);
+        store.batch(() => {
+            w.set('bet', 10);
+            w.set('balance', 500);
+            expect(fn).not.toHaveBeenCalled();
+        });
+        expect(fn).toHaveBeenCalledTimes(1);
+        expect(fn.mock.calls[0][0]).toMatchObject({ bet: 10, balance: 500 });
+    });
+
+    it('flush order: field then slice, per-slice', () => {
+        const store = createStore({ wallet: walletDef, spin: spinDef });
+        const w = store.handle('wallet');
+        const s = store.handle('spin');
+        const order: string[] = [];
+        w.on('bet', () => order.push('wallet:field'));
+        w.onChange(() => order.push('wallet:slice'));
+        s.on('remaining', () => order.push('spin:field'));
+        s.onChange(() => order.push('spin:slice'));
+        store.batch(() => {
+            w.set('bet', 10);
+            s.set('remaining', 0);
+        });
+        expect(order).toEqual([
+            'wallet:field', 'wallet:slice',
+            'spin:field', 'spin:slice',
+        ]);
+    });
+
+    it('multiple updates to same field: fires once with final value and original prev', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.on('bet', fn);
+        store.batch(() => {
+            w.set('bet', 5);
+            w.set('bet', 10);
+            w.set('bet', 20);
+        });
+        expect(fn).toHaveBeenCalledTimes(1);
+        expect(fn).toHaveBeenCalledWith(20, 1);
+    });
+
+    it('nested batch runs inline', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.onChange(fn);
+        store.batch(() => {
+            store.batch(() => {
+                w.set('bet', 10);
+            });
+            expect(fn).not.toHaveBeenCalled();
+        });
+        expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('no-op if no changes in batch', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.onChange(fn);
+        store.batch(() => {
+            // no mutations
+        });
+        expect(fn).not.toHaveBeenCalled();
+    });
+
+    it('rolls back state on error', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        expect(() => {
+            store.batch(() => {
+                w.set('bet', 99);
+                w.set('balance', 0);
+                throw new Error('abort');
+            });
+        }).toThrow('abort');
+        expect(w.get('bet')).toBe(1);
+        expect(w.get('balance')).toBe(1000);
+    });
+
+    it('rolls back multiple slices on error', () => {
+        const store = createStore({ wallet: walletDef, spin: spinDef });
+        const w = store.handle('wallet');
+        const s = store.handle('spin');
+        expect(() => {
+            store.batch(() => {
+                w.set('bet', 99);
+                s.set('remaining', 0);
+                throw new Error('abort');
+            });
+        }).toThrow('abort');
+        expect(w.get('bet')).toBe(1);
+        expect(s.get('remaining')).toBe(5);
+    });
+
+    it('fires zero signals on rollback', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fieldFn = vi.fn();
+        const sliceFn = vi.fn();
+        w.on('bet', fieldFn);
+        w.onChange(sliceFn);
+        expect(() => {
+            store.batch(() => {
+                w.set('bet', 99);
+                throw new Error('abort');
+            });
+        }).toThrow('abort');
+        expect(fieldFn).not.toHaveBeenCalled();
+        expect(sliceFn).not.toHaveBeenCalled();
+    });
+
+    it('store is usable after rollback', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        expect(() => {
+            store.batch(() => {
+                w.set('bet', 99);
+                throw new Error('abort');
+            });
+        }).toThrow('abort');
+        w.set('bet', 5);
+        expect(w.get('bet')).toBe(5);
+    });
+
+    it('merge inside batch defers notifications', () => {
+        const store = createStore({ wallet: walletDef });
+        const w = store.handle('wallet');
+        const fn = vi.fn();
+        w.onChange(fn);
+        store.batch(() => {
+            w.merge({ balance: 500, bet: 10 });
+            expect(fn).not.toHaveBeenCalled();
+        });
+        expect(fn).toHaveBeenCalledTimes(1);
+    });
+});
