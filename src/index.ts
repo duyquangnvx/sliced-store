@@ -77,9 +77,53 @@ export class SliceHandle<T extends Record<string, unknown>> {
         return () => subs!.delete(listener as FieldListener<unknown>);
     }
 
+    set<K extends keyof T & string>(key: K, value: T[K]): void {
+        const prev = this._state[key];
+        if (Object.is(prev, value)) return;
+
+        const newState = deepFreeze({ ...this._state, [key]: value } as T);
+
+        if (this._batch.active) {
+            if (!this._batch.snapshots.has(this._name)) {
+                this._batch.snapshots.set(this._name, this._state as Record<string, unknown>);
+            }
+            this._batch.dirtySlices.add(this._name);
+            let fields = this._batch.pendingFields.get(this._name);
+            if (!fields) {
+                fields = new Map();
+                this._batch.pendingFields.set(this._name, fields);
+            }
+            const existing = fields.get(key);
+            if (existing) {
+                existing.value = newState[key];
+            } else {
+                fields.set(key, { prev, value: newState[key] });
+            }
+            this._state = newState;
+            return;
+        }
+
+        this._state = newState;
+        this._flushField(key, newState[key], prev);
+        this._flushSlice();
+    }
+
     onChange(listener: SliceListener<T>): Unsubscribe {
         this._sliceListeners.add(listener);
         return () => this._sliceListeners.delete(listener);
+    }
+
+    /** @internal */
+    _flushField(key: string, value: unknown, prev: unknown): void {
+        const subs = this._fieldListeners.get(key);
+        if (subs) {
+            for (const fn of subs) fn(value, prev);
+        }
+    }
+
+    /** @internal */
+    _flushSlice(): void {
+        for (const fn of this._sliceListeners) fn(this._state);
     }
 
     /** @internal */ _getState(): T { return this._state; }
